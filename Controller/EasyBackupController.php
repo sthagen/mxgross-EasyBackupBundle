@@ -58,34 +58,37 @@ final class EasyBackupController extends AbstractController
      */
     private $filesystem;
 
-    /**
-     * @var LoggerInterface
-     */
-    private $logger;
-
-    public function __construct(string $dataDirectory, EasyBackupConfiguration $configuration, LoggerInterface $logger = null)
+    public function __construct(string $dataDirectory, EasyBackupConfiguration $configuration)
     {
         $this->kimaiRootPath = dirname(dirname($dataDirectory)).DIRECTORY_SEPARATOR;
         $this->configuration = $configuration;
         $this->dbUrl = $_SERVER['DATABASE_URL'];
         $this->filesystem = new Filesystem();
-        $this->logger = $logger;
     }
 
     private function log($logLevel, $message)
     {
-        $logFile = $this->getBackupDirectory().self::LOG_FILE_NAME;
+        $backupDir = $this->getBackupDirectory();
+        $logFile = $backupDir.self::LOG_FILE_NAME;
 
-        if (!file_exists($logFile)) {
-            $this->filesystem->touch($logFile);
+        try {
+            if (!file_exists($logFile)) {
+                $this->filesystem->touch($logFile);
+            }
+    
+            $dateTime = date('Y-m-d H:i:s');
+            $this->filesystem->appendToFile($logFile, "[$dateTime] $logLevel: $message".PHP_EOL);
+
+        }  catch (\Exception $e) {
+           $this->flashError('filesystem.mkdir.error.backupDir');
         }
 
-        $dateTime = date('Y-m-d H:i:s');
-        $this->filesystem->appendToFile($logFile, "[$dateTime] $logLevel: $message".PHP_EOL);
     }
 
     private function getBackupDirectory(): string
     {
+$this->configuration->getMysqlDumpCommand();
+
         return str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $this->kimaiRootPath.$this->configuration->getBackupDir());
     }
 
@@ -96,10 +99,14 @@ final class EasyBackupController extends AbstractController
      */
     public function indexAction(): Response
     {
-        $existingBackups = [];
-
-        $status = $this->checkStatus();
         $backupDir = $this->getBackupDirectory();
+
+        if (!file_exists($backupDir)) {
+            $this->filesystem->mkdir($backupDir);
+        }
+
+        $existingBackups = [];
+        $status = $this->checkStatus();
 
         if ($this->filesystem->exists($backupDir)) {
             $files = scandir($backupDir, SCANDIR_SORT_DESCENDING);
@@ -114,9 +121,9 @@ final class EasyBackupController extends AbstractController
                     $existingBackups[$fileOrDir] = $filesizeInMb;
                 }
             }
-        }
+        } 
 
-        $logFile = $this->getBackupDirectory().self::LOG_FILE_NAME;
+        $logFile = $backupDir.self::LOG_FILE_NAME;
         $log = file_exists($logFile) ? file_get_contents($logFile) : 'empty';
 
         return $this->render('@EasyBackup/index.html.twig', [
@@ -285,7 +292,7 @@ final class EasyBackupController extends AbstractController
             $this->filesystem->remove($restoreDir);
         } else {
             $this->flashError('backup.action.filename.error');
-            $this->log(self::LOG_ERRROR_PREFIX, "Backup '$backupName' not found.");
+            $this->log(self::LOG_ERROR_PREFIX, "Backup '$backupName' not found.");
         }
 
         return $this->redirectToRoute('easy_backup');
@@ -336,7 +343,7 @@ final class EasyBackupController extends AbstractController
             $path = realpath($dir.DIRECTORY_SEPARATOR.$fileOrDir);
             if (!is_dir($path)) {
                 $resultFileList[] = $path;
-            } elseif ($fileOrDir != '.' && $fileOrDir != '..') {
+            } elseif (!in_array($fileOrDir, ['.', '..', '.git'])) {
                 $this->getFilesInDirRecursively($path, $resultFileList);
             }
         }
@@ -386,7 +393,7 @@ final class EasyBackupController extends AbstractController
                         $this->log(self::LOG_ERROR_PREFIX, "Unable to copy to '$filenameAbsNew'. Please check the file permissions and try it again.");
                     }
                 } else {
-                    $this->log(self::LOG_ERROR_PREFIX, "Failed to change permissions of '$filenameAbsNew' to '$filePermissions'.");
+                    $this->log(self::LOG_ERROR_PREFIX, "Failed to change permissions of '$filenameAbsNew' to '$newFilePermissions'.");
                 }
             }
         }
@@ -428,7 +435,7 @@ final class EasyBackupController extends AbstractController
         // This is only for mysql and mariadb. sqlite will be backuped via the file backups
         $this->log(self::LOG_INFO_PREFIX, "Used database: '$dbUsed'.");
 
-        if ($dbUsed === 'mysql') {
+        if ($dbUsed === 'mysql' || $dbUsed === 'mysqli') {
             $dbUser = str_replace('/', '', $dbUrlExploded[1]);
             $dbPwd = explode('@', $dbUrlExploded[2])[0];
             $dbHost = explode('@', $dbUrlExploded[2])[1];
@@ -447,23 +454,22 @@ final class EasyBackupController extends AbstractController
             // $numErrors is 0 when no error occured, else the number of occured errors
             // $output is an string array containing success or error messages
 
-            exec("($mysqlDumpCmd 2>&1)", $outputArr, $numErrors);
+            $mysqlResArr = $this->execute($mysqlDumpCmd);
 
-            if ($numErrors > 0) {
-                foreach ($outputArr as $error) {
-                    $this->flashError($error);
-                    $this->log(self::LOG_ERROR_PREFIX, "mysqldump: '$error'.");
-                }
-            } else {
+            if(!empty($mysqlResArr['out'])) {
                 $this->log(self::LOG_INFO_PREFIX, "Creating '$sqlDumpName'.");
                 $this->filesystem->touch($sqlDumpName);
-
-                foreach ($outputArr as $line) {
-                    if (!$this->startsWith('mysqldump: [Warning]', $line)) {
-                        $this->filesystem->appendToFile($sqlDumpName, $line."\n");
-                    }
-                }
+                $this->filesystem->appendToFile($sqlDumpName, $mysqlResArr['out']);
             }
+
+            $errorsStr = $mysqlResArr['err'];
+            $errorsStr = str_replace('mysqldump: [Warning] Using a password on the command line interface can be insecure.', '', $errorsStr);
+            $errorsStr = trim($errorsStr, PHP_EOL);
+
+            if (!empty($errorsStr)) {
+                $this->flashError($errorsStr);
+                $this->log(self::LOG_ERROR_PREFIX, $errorsStr);
+            } 
         }
     }
 
@@ -495,7 +501,7 @@ final class EasyBackupController extends AbstractController
             }
         } else {
             $this->flashError('backup.action.zip.error.extension');
-            $this->log(self::LOG_ERROR_PREFIX, "Extension '$zip' not found.");
+            $this->log(self::LOG_ERROR_PREFIX, "Extension ZIP not found.");
         }
 
         return false;
@@ -548,46 +554,127 @@ final class EasyBackupController extends AbstractController
         return false;
     }
 
+    private function execute($cmd, $workdir = null) {
+
+        if (is_null($workdir)) {
+            $workdir = __DIR__;
+        }
+    
+        $descriptorspec = array(
+           0 => array("pipe", "r"),  // stdin
+           1 => array("pipe", "w"),  // stdout
+           2 => array("pipe", "w"),  // stderr
+        );
+    
+        $process = proc_open($cmd, $descriptorspec, $pipes, $workdir, null);
+    
+        $stdout = stream_get_contents($pipes[1]);
+        fclose($pipes[1]);
+    
+        $stderr = stream_get_contents($pipes[2]);
+        fclose($pipes[2]);
+    
+        return [
+            'code' => proc_close($process),
+            'out' => trim($stdout),
+            'err' => trim($stderr),
+        ];
+    }
+
     private function checkStatus()
     {
         $status = [];
 
         $path = $this->kimaiRootPath.'var';
-        $status["Path '$path' readable"] = is_readable($path);
-        $status["Path '$path' writable"] = is_writable($path);
-        $status["PHP extension 'zip' loaded"] = extension_loaded('zip');
-        $status['Kimai version'] = $this->getKimaiVersion();
+        $status[] = [
+                'desc' => "Path '$path' readable",
+                'status' => is_readable($path),
+                'result' => '',
+        ];
 
-        $cmd = self::CMD_GIT_HEAD;
-        $status[$cmd] = exec($cmd);
+        $path = $this->kimaiRootPath.'var';
+        $status[] = [
+            'desc' => "Path '$path' writable",
+            'status' => is_writable($path),
+            'result' => '',
+        ];
 
-        // Check used database
+        $path = $this->getBackupDirectory();
+        $status[] = [
+            'desc' => "Backup directory '$path' exists",
+            'status' => is_writable($path),
+            'result' => '',
+        ];
 
-        $dbUrlExploded = explode(':', $this->dbUrl);
-        $dbUsed = $dbUrlExploded[0];
+        $status[] = [
+            'desc' => "PHP extension 'zip' loaded",
+            'status' => extension_loaded('zip'),
+            'result' => '',
+        ];
 
-        $status['Database'] = $dbUsed;
+        $status[] = [
+            'desc' => 'Kimai version',
+            'status' => true,
+            'result' => $this->getKimaiVersion(),
+        ];
 
-        if ($dbUsed === 'mysql' || $dbUsed === 'mysqli') {
-            // Check if the mysqldump command is working
+        // Todo: build path via config files instead of manually
+        $dotGitPath = $this->kimaiRootPath . 'var' . DIRECTORY_SEPARATOR . 'plugins' . DIRECTORY_SEPARATOR . 'EasyBackupBundle' . DIRECTORY_SEPARATOR .'.git';
 
-            $cmd = $this->configuration->getMysqlDumpCommand();
-            $cmd = explode(' ', $cmd)[0].' --version';
-            $status[$cmd] = exec($cmd);
-
-            // Check if the mysql command is working
-
-            $cmd = $this->configuration->getMysqlRestoreCommand();
-            $cmd = explode(' ', $cmd)[0].' --version';
-            $status[$cmd] = exec($cmd);
+        if (file_exists($dotGitPath)) {
+            $cmd = self::CMD_GIT_HEAD;
+            $cmdResArr = $this->execute($cmd);
+            $cmdRes = !empty($cmdResArr['err']) ? $cmdResArr['err'] : $cmdResArr['out'];
+    
+            $status[] = [
+                'desc' => 'git',
+                'status' => empty($cmdResArr['err']),
+                'result' => $cmdRes,
+            ];
+        } else {
+            $this->log(self::LOG_INFO_PREFIX, 'No git repository recognized. Expected path: ' . $dotGitPath);
         }
 
         // Check used database
 
         $dbUrlExploded = explode(':', $this->dbUrl);
         $dbUsed = $dbUrlExploded[0];
+        $dbUsedExpected = ['mysql', 'mysqli', 'sqllite'];
 
-        $status['Database'] = $dbUsed;
+        $status[] = [
+            'desc' => 'Database',
+            'status' => in_array($dbUsed, $dbUsedExpected),
+            'result' => $dbUsed,
+        ];
+
+        if ($dbUsed === 'mysql' || $dbUsed === 'mysqli') {
+
+            // Check if the mysqldump command is working
+
+            $cmd = $this->configuration->getMysqlDumpCommand();
+            $cmd = explode(' ', $cmd)[0].' --version';
+            $cmdResArr = $this->execute($cmd);
+            $cmdRes = !empty($cmdResArr['err']) ? $cmdResArr['err'] : $cmdResArr['out'];
+
+            $status[] = [
+                'desc' => $cmd,
+                'status' => empty($cmdResArr['err']),
+                'result' => $cmdRes,
+            ];
+
+            // Check if the mysql command is working
+
+            $cmd = $this->configuration->getMysqlRestoreCommand();
+            $cmd = explode(' ', $cmd)[0].' --version';
+            $cmdResArr = $this->execute($cmd);
+            $cmdRes = !empty($cmdResArr['err']) ? $cmdResArr['err'] : $cmdResArr['out'];
+
+            $status[] = [
+                'desc' => $cmd,
+                'status' => empty($cmdResArr['err']),
+                'result' => $cmdRes,
+            ];
+        }
 
         return $status;
     }
@@ -610,7 +697,7 @@ final class EasyBackupController extends AbstractController
         $dbUrlExploded = explode(':', $this->dbUrl);
         $dbUsed = $dbUrlExploded[0];
 
-        if ($dbUsed === 'mysql') {
+        if ($dbUsed === 'mysql' || $dbUsed === 'mysqli') {
             $dbUser = str_replace('/', '', $dbUrlExploded[1]);
             $dbPwd = explode('@', $dbUrlExploded[2])[0];
             $dbHost = explode('@', $dbUrlExploded[2])[1];
@@ -619,20 +706,24 @@ final class EasyBackupController extends AbstractController
 
             $mysqlCmd = $this->configuration->getMysqlRestoreCommand();
             $mysqlCmd = str_replace('{user}', $dbUser, $mysqlCmd);
-            $mysqlCmd = str_replace('{password}', $dbPwd, $mysqlCmd);
+            $mysqlCmd = str_replace('{password}', urldecode($dbPwd), $mysqlCmd);
             $mysqlCmd = str_replace('{host}', $dbHost, $mysqlCmd);
             $mysqlCmd = str_replace('{port}', $dbPort, $mysqlCmd);
             $mysqlCmd = str_replace('{database}', $dbName, $mysqlCmd);
             $mysqlCmd = str_replace('{sql_file}', $restoreDir.self::SQL_DUMP_FILENAME, $mysqlCmd);
 
-            exec("($mysqlCmd 2>&1)", $outputArr, $numErrors);
+            $mysqlResArr = $this->execute($mysqlCmd);
+            $error = $mysqlResArr['err'];
 
-            if ($numErrors > 0) {
-                foreach ($outputArr as $error) {
-                    $this->flashError($error);
-                    $this->log(self::LOG_ERROR_PREFIX, $error);
-                }
-            }
+            $errorsStr = $mysqlResArr['err'];
+            $errorsStr = str_replace('mysql: [Warning] Using a password on the command line interface can be insecure.', '', $errorsStr);
+            $errorsStr = trim($errorsStr, PHP_EOL);
+
+            if (!empty($errorsStr)) {
+                $this->flashError($errorsStr);
+                $this->log(self::LOG_ERROR_PREFIX, $errorsStr);
+            } 
+
         }
 
         $this->log(self::LOG_INFO_PREFIX, 'Restored MySQL database.');

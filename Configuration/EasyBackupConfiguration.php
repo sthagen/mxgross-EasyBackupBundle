@@ -9,35 +9,55 @@
 
 namespace KimaiPlugin\EasyBackupBundle\Configuration;
 
-use App\Configuration\StringAccessibleConfigTrait;
-use App\Configuration\SystemBundleConfiguration;
+use App\Configuration\SystemConfiguration;
 
-class EasyBackupConfiguration implements SystemBundleConfiguration, \ArrayAccess
+final class EasyBackupConfiguration
 {
-    use StringAccessibleConfigTrait;
+    private $configuration;
 
-    public function getPrefix(): string
+    public function __construct(SystemConfiguration $configuration)
     {
-        return 'easy_backup';
+        $this->configuration = $configuration;
     }
 
     public function getMysqlDumpCommand(): string
     {
-        return (string) $this->find('setting_mysqldump_command');
+        $config = $this->configuration->find('easy_backup.setting_mysqldump_command');
+        if (!is_string($config)) {
+            return 'NOT SET';
+        }
+
+        return $config;
     }
 
     public function getMysqlRestoreCommand(): string
     {
-        return (string) $this->find('setting_mysql_restore_command');
+        $config = $this->configuration->find('easy_backup.setting_mysql_restore_command');
+        if (!is_string($config)) {
+            return 'NOT SET';
+        }
+
+        return $config;
     }
 
     public function getBackupDir(): string
     {
-        return (string) $this->find('setting_backup_dir');
+        $config = $this->configuration->find('easy_backup.setting_backup_dir');
+        if (!is_string($config)) {
+            return 'NOT SET';
+        }
+
+        return $config;
     }
 
     public function getPathsToBeBackuped(): string
     {
-        return (string) $this->find('setting_paths_to_backup');
+        $config = $this->configuration->find('easy_backup.setting_paths_to_backup');
+
+        if (!is_string($config)) {
+            return 'NOT SET';
+        }
+
+        return $config;
     }
 }

@@ -18,9 +18,9 @@ class Configuration implements ConfigurationInterface
     /**
      * {@inheritdoc}
      */
-    public function getConfigTreeBuilder()
+    public function getConfigTreeBuilder(): TreeBuilder
     {
-        $treeBuilder = new TreeBuilder('easybackup');
+        $treeBuilder = new TreeBuilder('easy_backup');
         /** @var ArrayNodeDefinition $rootNode */
         $rootNode = $treeBuilder->getRootNode();
 
@@ -39,7 +39,7 @@ class Configuration implements ConfigurationInterface
             ->addDefaultsIfNotSet()
             ->children()
                 ->scalarNode('setting_mysqldump_command')
-                    ->defaultValue('/usr/bin/mysqldump --user={user} --password={password} --host={host} --port={port} --single-transaction --force {database}')
+                    ->defaultValue('/usr/bin/mysqldump --user={user} --password={password} --host={host} --port={port} --single-transaction --force {database} --no-tablespaces')
                 ->end()
                 ->scalarNode('setting_mysql_restore_command')
                     ->defaultValue('/usr/bin/mysql --user={user} --password={password} --host={host} --port={port} {database} < {sql_file}')

@@ -28,7 +28,6 @@ class EasyBackupExtension extends AbstractPluginExtension implements PrependExte
         $config = $this->processConfiguration($configuration, $configs);
 
         $this->registerBundleConfiguration($container, $config);
-        $container->setParameter('easy_backup_settings', $config);
 
         $loader = new Loader\YamlFileLoader(
             $container,
@@ -37,7 +36,7 @@ class EasyBackupExtension extends AbstractPluginExtension implements PrependExte
         $loader->load('services.yaml');
     }
 
-    public function prepend(ContainerBuilder $container)
+    public function prepend(ContainerBuilder $container): void
     {
         $container->prependExtensionConfig('kimai', [
             'permissions' => [
