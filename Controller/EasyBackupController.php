@@ -87,7 +87,7 @@ final class EasyBackupController extends AbstractController
 
     private function getBackupDirectory(): string
     {
-$this->configuration->getMysqlDumpCommand();
+        $this->configuration->getMysqlDumpCommand();
 
         return str_replace(['/', '\\'], DIRECTORY_SEPARATOR, $this->kimaiRootPath.$this->configuration->getBackupDir());
     }
@@ -105,23 +105,8 @@ $this->configuration->getMysqlDumpCommand();
             $this->filesystem->mkdir($backupDir);
         }
 
-        $existingBackups = [];
         $status = $this->checkStatus();
-
-        if ($this->filesystem->exists($backupDir)) {
-            $files = scandir($backupDir, SCANDIR_SORT_DESCENDING);
-            $filesAndDirs = array_diff($files, ['.', '..', self::GITIGNORE_NAME]);
-
-            foreach ($filesAndDirs as $fileOrDir) {
-                // Make sure that only files are listed which match our wanted regex
-
-                if (is_file($backupDir.$fileOrDir)
-                && preg_match(self::REGEX_BACKUP_ZIP_NAME, $fileOrDir) == 1) {
-                    $filesizeInMb = round(filesize($backupDir.$fileOrDir) / 1048576, 3);
-                    $existingBackups[$fileOrDir] = $filesizeInMb;
-                }
-            }
-        } 
+        $existingBackups = $this->getExistingBackups();
 
         $logFile = $backupDir.self::LOG_FILE_NAME;
         $log = file_exists($logFile) ? file_get_contents($logFile) : 'empty';
@@ -219,6 +204,9 @@ $this->configuration->getMysqlDumpCommand();
 
         $this->log(self::LOG_INFO_PREFIX, "Remove temp file '$sqlDumpName'.");
         $this->filesystem->remove($sqlDumpName);
+
+        // Delete old backups if configured so
+        $this->deleteOldBackups();
 
         $this->flashSuccess('backup.action.create.success');
         $this->log(self::LOG_INFO_PREFIX, '--- F I N I S H E D   C R E A T I N G   B A C K U P ---');
@@ -335,6 +323,71 @@ $this->configuration->getMysqlDumpCommand();
         ]);
     }
 
+
+    private function getExistingBackups() 
+    {
+        $backupDir = $this->getBackupDirectory();
+        $existingBackups = [];
+
+        if ($this->filesystem->exists($backupDir)) {
+            $files = scandir($backupDir, SCANDIR_SORT_DESCENDING);
+            $filesAndDirs = array_diff($files, ['.', '..', self::GITIGNORE_NAME]);
+
+            foreach ($filesAndDirs as $fileOrDir) {
+                // Make sure that only files are listed which match our wanted regex
+
+                if (is_file($backupDir.$fileOrDir)
+                && preg_match(self::REGEX_BACKUP_ZIP_NAME, $fileOrDir) == 1) {
+                    $filesizeInMb = round(filesize($backupDir.$fileOrDir) / 1048576, 3);
+                    $filemtime = filemtime($backupDir.$fileOrDir);
+
+                    $existingBackups[] = ['name' => $fileOrDir,
+                                          'size' => $filesizeInMb,
+                                          'filemtime' => $filemtime];
+                }
+            }
+        } 
+
+        return $existingBackups;
+    }
+
+    private function deleteOldBackups() 
+    {
+        $backupAmountMax = $this->configuration->getBackupAmountMax();
+        $existingBackupsArr = $this->getExistingBackups();
+        $numBackupsExisting = count($existingBackupsArr);
+        $backupsToDeleteArr = [];
+
+        // Important to do nothing when backupAmountMax is -1 or 0, because then we want to keep all the backups / no auto deletion
+        if ($backupAmountMax > 0 && $numBackupsExisting > $backupAmountMax) {
+            $this->log(self::LOG_INFO_PREFIX, "Delete old backups. Max. amount to keep: $backupAmountMax; Existing: $numBackupsExisting");
+
+            // Sort backups by creation date
+            usort($existingBackupsArr, function($a, $b) {
+                return $a['filemtime'] <=> $b['filemtime'];
+            });
+
+            $amountToDelete = $numBackupsExisting - $backupAmountMax;
+
+            // A array with all backups to delete is wanted
+            array_splice($existingBackupsArr, $amountToDelete);
+
+            $backupsToDeleteArr = $existingBackupsArr;
+            $path = $this->getBackupDirectory();
+
+            foreach ($backupsToDeleteArr as $backupToDelete) {
+                $backupFullPath = $path.$backupToDelete['name'];
+
+                if ($this->filesystem->exists($backupFullPath)) {
+                    $this->filesystem->remove($backupFullPath);
+                    $this->log(self::LOG_INFO_PREFIX, "Deleted backup '$backupFullPath'");
+                }
+            }
+        }
+
+        return $backupsToDeleteArr;
+    }
+
     private function getFilesInDirRecursively($dir, &$resultFileList = [])
     {
         $files = scandir($dir);
@@ -429,27 +482,41 @@ $this->configuration->getMysqlDumpCommand();
     private function backupDatabase(string $sqlDumpName)
     {
         $this->log(self::LOG_INFO_PREFIX, 'Start database backup.');
-        $dbUrlExploded = explode(':', $this->dbUrl);
-        $dbUsed = $dbUrlExploded[0];
+        
+        $urlParsed = parse_url($this->dbUrl);
+
+        /*  Example:
+
+            array(6) {
+            ["scheme"] => string(5) "mysql"
+            ["host"]   => string(9) "127.0.0.1"
+            ["port"]   => int(3306)
+            ["user"]   => string(8) "myDbUser"
+            ["pass"]   => string(24) "my-super-secret-password"
+            ["path"]   => string(9) "/myDBName"
+            ["query"]  => string(30) "charset=utf8&serverVersion=5.7"
+            }
+        */
 
         // This is only for mysql and mariadb. sqlite will be backuped via the file backups
-        $this->log(self::LOG_INFO_PREFIX, "Used database: '$dbUsed'.");
+        $this->log(self::LOG_INFO_PREFIX, "Used database: '{$urlParsed['scheme']}'.");
 
-        if ($dbUsed === 'mysql' || $dbUsed === 'mysqli') {
-            $dbUser = str_replace('/', '', $dbUrlExploded[1]);
-            $dbPwd = explode('@', $dbUrlExploded[2])[0];
-            $dbHost = explode('@', $dbUrlExploded[2])[1];
-            $dbPort = explode('/', explode('@', $dbUrlExploded[3])[0])[0];
-            $dbName = explode('?', explode('/', $dbUrlExploded[3])[1])[0];
+        if ($urlParsed['scheme'] === 'mysql' || $urlParsed['scheme'] === 'mysqli') {
 
             // The MysqlDumpCommand per default looks like this: '/usr/bin/mysqldump --user={user} --password={password} --host={host} --port={port} --single-transaction --force {database}'
 
             $mysqlDumpCmd = $this->configuration->getMysqlDumpCommand();
-            $mysqlDumpCmd = str_replace('{user}', $dbUser, $mysqlDumpCmd);
-            $mysqlDumpCmd = str_replace('{password}', urldecode($dbPwd), $mysqlDumpCmd);
-            $mysqlDumpCmd = str_replace('{host}', $dbHost, $mysqlDumpCmd);
-            $mysqlDumpCmd = str_replace('{port}', $dbPort, $mysqlDumpCmd);
-            $mysqlDumpCmd = str_replace('{database}', $dbName, $mysqlDumpCmd);
+            $mysqlDumpCmd = str_replace('{user}', $urlParsed['user'], $mysqlDumpCmd);
+            $mysqlDumpCmd = str_replace('{password}', urldecode($urlParsed['pass']), $mysqlDumpCmd);
+            $mysqlDumpCmd = str_replace('{host}', $urlParsed['host'] , $mysqlDumpCmd);
+            $mysqlDumpCmd = str_replace('{database}', trim($urlParsed['path'], '/'), $mysqlDumpCmd);
+
+            // Port can be default port / empty in database URL
+            if (array_key_exists('port', $urlParsed)) {
+                $mysqlDumpCmd = str_replace('{port}', $urlParsed['port'], $mysqlDumpCmd);
+            } else {
+                $mysqlDumpCmd = str_replace('--port={port}', '', $mysqlDumpCmd);
+            }
 
             // $numErrors is 0 when no error occured, else the number of occured errors
             // $output is an string array containing success or error messages
