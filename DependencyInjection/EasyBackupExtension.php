@@ -1,8 +1,8 @@
 <?php
 
 /*
- * This file is part of the EasyBackupBundle for Kimai 2.
- *
+ * This file is part of the EasyBackupBundle.
+ * All rights reserved by Maximilian Groß (www.maximiliangross.de).
  * For the full copyright and license information, please view the LICENSE
  * file that was distributed with this source code.
  */
@@ -14,6 +14,7 @@ use Symfony\Component\Config\FileLocator;
 use Symfony\Component\DependencyInjection\ContainerBuilder;
 use Symfony\Component\DependencyInjection\Extension\PrependExtensionInterface;
 use Symfony\Component\DependencyInjection\Loader;
+use Symfony\Component\HttpKernel\DependencyInjection\Extension;
 
 class EasyBackupExtension extends AbstractPluginExtension implements PrependExtensionInterface
 {
@@ -38,6 +39,9 @@ class EasyBackupExtension extends AbstractPluginExtension implements PrependExte
 
     public function prepend(ContainerBuilder $container): void
     {
+        /*
+         * @CloudRequired adapt if new permissions are added
+         */
         $container->prependExtensionConfig('kimai', [
             'permissions' => [
                 'roles' => [
